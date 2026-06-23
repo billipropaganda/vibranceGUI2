@@ -16,6 +16,18 @@ public class AppProfile
     public double Contrast { get; set; } = 0.50;
     public double Gamma { get; set; } = 1.0;
 
+    /// <summary>Custom display resolution/scale. Null = no display override for this profile.</summary>
+    public int? DisplayWidth { get; set; }
+    public int? DisplayHeight { get; set; }
+    public int? DisplayRefreshRate { get; set; }
+    public int? DisplayScale { get; set; }
+
+    /// <summary>True when this profile has complete display override settings.</summary>
+    [JsonIgnore]
+    public bool HasDisplayProfile =>
+        DisplayWidth.HasValue && DisplayHeight.HasValue &&
+        DisplayRefreshRate.HasValue && DisplayScale.HasValue;
+
     /// <summary>Base64-encoded PNG for persistence.</summary>
     public string IconBase64 { get; set; } = "";
 
@@ -88,4 +100,8 @@ public class AppSettings
     public string ThemeMode { get; set; } = "Dark";
     public bool AutoStart { get; set; }
     public ObservableCollection<AppProfile> Profiles { get; set; } = new();
+
+    /// <summary>Saved primary display mode before profile override. Used for restore.</summary>
+    [JsonIgnore]
+    public DisplayMode.ModeInfo SavedDisplayMode { get; set; }
 }

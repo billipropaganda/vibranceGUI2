@@ -74,6 +74,15 @@
                         </Button.Template>
                     </Button>
                 </Grid>
+                <Border Background="{DynamicResource Brush.SurfaceAlt}" CornerRadius="6"
+                        Padding="8,6" Margin="0,4,0,6">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock x:Name="MonitorInfoLabel" FontSize="12"
+                                   Foreground="{DynamicResource Brush.TextSecondary}"
+                                   VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Border>
+
                 <Grid Margin="0,4">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="88"/>

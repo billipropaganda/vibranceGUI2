@@ -21,6 +21,11 @@ public partial class MainWindow : Window
     private AppSettings _settings = new();
     private AppProfile? _activeProfile;
     private bool _isDefaultActive = true;
+    private bool _isClosing;
+    private bool _displayProfileActive;
+    private CancellationTokenSource _displayCts = new();
+    private DisplayMode.ModeInfo _savedMode;
+    private int _savedDpi = -1; // -1 = unknown, don't restore
     private IntPtr _monitorDC;
     private readonly VibranceController _vibrance = new();
 
@@ -65,7 +70,17 @@ public partial class MainWindow : Window
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
     {
-        _monitorDC = GammaRamp.GetPrimaryDC();
+        try { _monitorDC = GammaRamp.GetPrimaryDC(); }
+        catch { _monitorDC = IntPtr.Zero; }
+
+        // Show current monitor resolution
+        try
+        {
+            var cur = DisplayMode.GetCurrentMode();
+            var dpi = GetCurrentDpi();
+            MonitorInfoLabel.Text = $"Monitor: {cur.Width}×{cur.Height} @ {cur.RefreshRate}Hz  |  DPI: {dpi}%";
+        }
+        catch { MonitorInfoLabel.Text = "Monitor: (detection failed)"; }
 
         LoadSettings();
 
@@ -155,7 +170,21 @@ public partial class MainWindow : Window
 
     public void Cleanup()
     {
+        _isClosing = true;
+        _displayCts.Cancel();
         WinEventHook.Instance.Dispose();
+        if (_displayProfileActive && _savedMode.Width != 0)
+        {
+            var w = _savedMode.Width;
+            var h = _savedMode.Height;
+            var fr = _savedMode.RefreshRate;
+            var edid = DisplayMode.GetPrimaryEDID();
+            DisplayMode.SetMode(w, h, fr);
+            Thread.Sleep(160);
+            DisplayMode.SetMode(w, h, fr);
+            if (edid != null && _savedDpi > 0)
+                DisplayMode.SetDpiScale(edid, _savedDpi);
+        }
         _vibrance.Dispose();
         GammaRamp.Reset(_monitorDC);
         GammaRamp.FreeDC(_monitorDC);
@@ -237,19 +266,165 @@ public partial class MainWindow : Window
 
     private void ApplyDefault()
     {
-        _vibrance.CurrentLevel = _settings.DefaultVibrance;
-        GammaRamp.Apply(_monitorDC, _settings.DefaultBrightness,
-            _settings.DefaultContrast, _settings.DefaultGamma);
         _isDefaultActive = true;
         _activeProfile = null;
+
+        // Restore display mode if we overrode it for a profile
+        if (_displayProfileActive)
+        {
+            _displayProfileActive = false;
+            RestoreDisplayMode();
+        }
+        else
+        {
+            ApplyDefaultColors();
+        }
     }
 
     private void ApplyProfile(AppProfile profile)
     {
-        _vibrance.CurrentLevel = profile.Vibrance;
-        GammaRamp.Apply(_monitorDC, profile.Brightness, profile.Contrast, profile.Gamma);
         _isDefaultActive = false;
         _activeProfile = profile;
+
+        if (profile.HasDisplayProfile)
+        {
+            if (!_displayProfileActive)
+            {
+                _savedMode = DisplayMode.GetCurrentMode();
+                _savedDpi = GetCurrentDpi();
+            }
+            _displayProfileActive = true;
+            ApplyDisplayMode(profile); // async: applies colors after display settles
+            ApplyProfileColors(profile); // immediate — will be re-applied async anyway
+        }
+        else
+        {
+            if (_displayProfileActive)
+            {
+                _displayProfileActive = false;
+                // Restore display then apply THIS profile's colors (not defaults)
+                RestoreDisplayMode(profile);
+            }
+            else
+            {
+                ApplyProfileColors(profile);
+            }
+        }
+    }
+
+    private void ApplyDefaultColors()
+    {
+        if (_monitorDC == IntPtr.Zero) return;
+        _vibrance.CurrentLevel = _settings.DefaultVibrance;
+        GammaRamp.Apply(_monitorDC, _settings.DefaultBrightness,
+            _settings.DefaultContrast, _settings.DefaultGamma);
+    }
+
+    private void ApplyProfileColors(AppProfile profile)
+    {
+        if (_monitorDC == IntPtr.Zero) return;
+        _vibrance.CurrentLevel = profile.Vibrance;
+        GammaRamp.Apply(_monitorDC, profile.Brightness, profile.Contrast, profile.Gamma);
+    }
+
+    private static int GetCurrentDpi()
+    {
+        // Try Win32 DPI first — always reliable
+        try
+        {
+            using var g = System.Drawing.Graphics.FromHwnd(IntPtr.Zero);
+            return (int)(g.DpiX / 0.96f); // 96 DPI = 100%, 144 = 150%, etc.
+        }
+        catch { }
+
+        // Fallback to registry
+        var edid = DisplayMode.GetPrimaryEDID();
+        if (edid == null) return -1;
+        try
+        {
+            using var hkcu = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Control Panel\Desktop\PerMonitorSettings");
+            if (hkcu != null)
+            {
+                foreach (var sub in hkcu.GetSubKeyNames())
+                {
+                    if (sub.Contains(edid, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var val = (int?)hkcu.OpenSubKey(sub)?.GetValue("DpiValue");
+                        return val switch { 0 => 100, 1 => 125, 2 => 150, 3 => 175, 4 => 200, _ => 100 };
+                    }
+                }
+            }
+        }
+        catch { }
+        return -1;
+    }
+
+    // ponytail: cancel any in-flight switch before starting a new one
+    private async void ApplyDisplayMode(AppProfile profile)
+    {
+        var cts = new CancellationTokenSource();
+        CancelPrevious(ref cts);
+
+        try
+        {
+            var w = (uint)profile.DisplayWidth!.Value;
+            var h = (uint)profile.DisplayHeight!.Value;
+            var fr = (uint)profile.DisplayRefreshRate!.Value;
+            var edid = DisplayMode.GetPrimaryEDID();
+
+            DisplayMode.SetMode(w, h, fr);
+            if (edid != null)
+                DisplayMode.SetDpiScale(edid, profile.DisplayScale!.Value);
+
+            await Task.Delay(450, cts.Token);
+            DisplayMode.SetMode(w, h, fr);
+            await Task.Delay(250, cts.Token);
+
+            if (_activeProfile != null && !_isClosing)
+                ApplyProfileColors(_activeProfile);
+        }
+        catch (OperationCanceledException) { }
+        catch { /* display switching is best-effort */ }
+    }
+
+    private async void RestoreDisplayMode(AppProfile? profile = null)
+    {
+        var cts = new CancellationTokenSource();
+        CancelPrevious(ref cts);
+
+        try
+        {
+            if (_savedMode.Width == 0) return;
+
+            var w = _savedMode.Width;
+            var h = _savedMode.Height;
+            var fr = _savedMode.RefreshRate;
+            var edid = DisplayMode.GetPrimaryEDID();
+
+            DisplayMode.SetMode(w, h, fr);
+            if (edid != null && _savedDpi > 0)
+                DisplayMode.SetDpiScale(edid, _savedDpi);
+
+            await Task.Delay(450, cts.Token);
+            DisplayMode.SetMode(w, h, fr);
+            await Task.Delay(250, cts.Token);
+
+            if (_isClosing) return;
+            if (profile != null && _activeProfile == profile)
+                ApplyProfileColors(profile);
+            else
+                ApplyDefaultColors();
+        }
+        catch (OperationCanceledException) { }
+        catch { /* display switching is best-effort */ }
+    }
+
+    private void CancelPrevious(ref CancellationTokenSource cts)
+    {
+        var old = Interlocked.Exchange(ref _displayCts, cts);
+        try { old.Cancel(); } catch (ObjectDisposedException) { }
+        // ponytail: don't dispose old — its owner disposes in finally, or we already swapped it
     }
 
     private void OnForegroundChanged(object? sender, WinEventHookEventArgs e)
@@ -742,12 +917,17 @@ public class ProfileEditorWindow : Window
     private readonly AppProfile _profile;
     private readonly Slider _vibSlider, _brightSlider, _contrastSlider, _gammaSlider;
     private readonly TextBox _vibTb, _brightTb, _contrastTb, _gammaTb;
+    private readonly CheckBox _displayCb;
+    private readonly ComboBox _resCb;
+    private readonly ComboBox _scaleCb;
+    private readonly StackPanel _displayPanel;
+    private List<DisplayMode.ModeInfo> _modes = new();
 
     public ProfileEditorWindow(AppProfile profile)
     {
         _profile = profile;
         Title = $"Edit: {profile.ProcessName}";
-        Width = 470; Height = 340;
+        Width = 470;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
         ResizeMode = ResizeMode.NoResize;
 
@@ -771,6 +951,80 @@ public class ProfileEditorWindow : Window
         panel.Children.Add(MakeRow("Brightness", _brightSlider, _brightTb));
         panel.Children.Add(MakeRow("Contrast", _contrastSlider, _contrastTb));
         panel.Children.Add(MakeRow("Gamma", _gammaSlider, _gammaTb));
+
+        // ── Display profile section ───────────────────────
+        panel.Children.Add(new Border { Height = 8 });
+
+        _displayCb = new CheckBox { Content = "Use custom display settings", FontSize = 13, Margin = new Thickness(0, 0, 0, 6) };
+        _displayCb.SetResourceReference(CheckBox.ForegroundProperty, "Brush.TextPrimary");
+
+        // Resolution row (same grid layout as slider rows)
+        _resCb = new ComboBox();
+        _resCb.SetResourceReference(ComboBox.BackgroundProperty, "Brush.SurfaceAlt");
+        _resCb.SetResourceReference(ComboBox.ForegroundProperty, "Brush.TextPrimary");
+        _resCb.SetResourceReference(ComboBox.BorderBrushProperty, "Brush.Border");
+
+        _scaleCb = new ComboBox { Width = 72 };
+        _scaleCb.SetResourceReference(ComboBox.BackgroundProperty, "Brush.SurfaceAlt");
+        _scaleCb.SetResourceReference(ComboBox.ForegroundProperty, "Brush.TextPrimary");
+        _scaleCb.SetResourceReference(ComboBox.BorderBrushProperty, "Brush.Border");
+        foreach (var pct in new[] { 100, 125, 150, 175, 200 })
+            _scaleCb.Items.Add($"{pct}%");
+
+        var resRow = new Grid { Margin = new Thickness(0, 4, 0, 4) };
+        resRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(88) });
+        resRow.ColumnDefinitions.Add(new ColumnDefinition());
+        resRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
+        resRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        resRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
+        resRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(72) });
+
+        var resLabel = new TextBlock { Text = "Resolution", VerticalAlignment = VerticalAlignment.Center };
+        Grid.SetColumn(resLabel, 0);
+        var scaleLbl = new TextBlock { Text = "Scale", VerticalAlignment = VerticalAlignment.Center };
+        Grid.SetColumn(scaleLbl, 3);
+        Grid.SetColumn(_resCb, 1);
+        Grid.SetColumn(_scaleCb, 5);
+        resRow.Children.Add(resLabel);
+        resRow.Children.Add(_resCb);
+        resRow.Children.Add(scaleLbl);
+        resRow.Children.Add(_scaleCb);
+
+        panel.Children.Add(_displayCb);
+        _displayPanel = new StackPanel();
+        _displayPanel.Children.Add(resRow);
+        panel.Children.Add(_displayPanel);
+
+        // Load available modes + restore saved display settings
+        try { _modes = DisplayMode.GetAvailableModes(); } catch { _modes = new(); }
+        foreach (var m in _modes)
+            _resCb.Items.Add($"{m.Width}×{m.Height} @ {m.RefreshRate}Hz");
+
+        var hasDisplay = profile.HasDisplayProfile;
+        _displayCb.IsChecked = hasDisplay;
+        _displayPanel.Visibility = hasDisplay ? Visibility.Visible : Visibility.Collapsed;
+
+        if (hasDisplay)
+        {
+            _resCb.SelectedIndex = _modes.FindIndex(m =>
+                m.Width == profile.DisplayWidth && m.Height == profile.DisplayHeight && m.RefreshRate == profile.DisplayRefreshRate);
+            _scaleCb.SelectedIndex = profile.DisplayScale switch
+            {
+                100 => 0, 125 => 1, 150 => 2, 175 => 3, 200 => 4, _ => 0
+            };
+        }
+
+        _displayCb.Checked += (_, _) =>
+        {
+            if (_scaleCb.SelectedIndex < 0) _scaleCb.SelectedIndex = 0;
+            _displayPanel.Visibility = Visibility.Visible;
+        };
+        _displayCb.Unchecked += (_, _) => _displayPanel.Visibility = Visibility.Collapsed;
+
+        // Adjust window height based on display section visibility
+        Height = hasDisplay ? 510 : 340;
+
+        // ── Slider sync ───────────────────────────────────
 
         UpdateTexts();
 
@@ -815,6 +1069,23 @@ public class ProfileEditorWindow : Window
             _profile.Brightness = _brightSlider.Value;
             _profile.Contrast = _contrastSlider.Value;
             _profile.Gamma = _gammaSlider.Value;
+
+            if (_displayCb.IsChecked == true && _resCb.SelectedIndex >= 0)
+            {
+                var m = _modes[_resCb.SelectedIndex];
+                _profile.DisplayWidth = (int)m.Width;
+                _profile.DisplayHeight = (int)m.Height;
+                _profile.DisplayRefreshRate = (int)m.RefreshRate;
+                var s = _scaleCb.SelectedItem as string;
+                _profile.DisplayScale = s != null ? int.Parse(s.TrimEnd('%')) : 100;
+            }
+            else
+            {
+                _profile.DisplayWidth = null;
+                _profile.DisplayHeight = null;
+                _profile.DisplayRefreshRate = null;
+                _profile.DisplayScale = null;
+            }
             DialogResult = true;
         };
         Grid.SetRow(saveBtn, 1);
@@ -852,7 +1123,6 @@ public class ProfileEditorWindow : Window
 
     private static TextBox NewValueField()
     {
-        // No explicit width — ValueField style sets MinWidth=64
         var tb = new TextBox { TextAlignment = TextAlignment.Center };
         tb.SetResourceReference(StyleProperty, "ValueField");
         return tb;
