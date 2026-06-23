@@ -60,7 +60,6 @@ public partial class MainWindow : Window
         exitItem.Click += (_, _) => CloseApp();
         _trayMenu.Items.Add(showItem);
         _trayMenu.Items.Add(settingsItem);
-        _trayMenu.Items.Add(new Separator());
         _trayMenu.Items.Add(exitItem);
     }
 
