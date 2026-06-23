@@ -37,3 +37,10 @@ dotnet run
 ```
 
 Settings are saved to `%APPDATA%\vibranceGUI2\settings.json`.
+
+## Credits
+
+Built on ideas and patterns from two excellent projects:
+
+- [vibranceGUI](https://github.com/juv/vibranceGUI) — the original per-app color profile tool, whose foreground detection and profile switching model inspired this app
+- [NVCP Toggle](https://github.com/mcgrizzz/NVCP_Toggle) — whose approach to NVAPI vibrance control and WindowsDisplayAPI gamma ramps formed the technical foundation
