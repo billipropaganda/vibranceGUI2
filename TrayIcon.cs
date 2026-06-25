@@ -19,9 +19,6 @@ public sealed class TrayIcon : IDisposable
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
     private static extern bool Shell_NotifyIcon(int dwMessage, ref NOTIFYICONDATA lpData);
 
-    [DllImport("user32.dll")]
-    private static extern bool DestroyIcon(IntPtr hIcon);
-
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct NOTIFYICONDATA
     {
@@ -36,6 +33,7 @@ public sealed class TrayIcon : IDisposable
     }
 
     private readonly IntPtr _hIcon;
+    private readonly Icon? _icon; // ponytail: keep alive so HICON isn't destroyed
     private readonly IntPtr _hwnd;
     private HwndSource? _source;
     private readonly int _callbackMsg;
@@ -45,14 +43,9 @@ public sealed class TrayIcon : IDisposable
 
     public TrayIcon(Window window, string tooltip = "vibranceGUI2")
     {
-        // Create a simple 16x16 icon
-        using var bmp = new Bitmap(16, 16);
-        for (int y = 0; y < 16; y++)
-            for (int x = 0; x < 16; x++)
-                bmp.SetPixel(x, y, (x + y) % 2 == 0
-                    ? Color.FromArgb(0, 120, 215)
-                    : Color.FromArgb(0, 80, 160));
-        _hIcon = bmp.GetHicon();
+        // ponytail: pull icon from exe (embedded via csproj ApplicationIcon)
+        _icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!);
+        _hIcon = _icon?.Handle ?? IntPtr.Zero;
 
         _hwnd = new WindowInteropHelper(window).EnsureHandle();
         _source = HwndSource.FromHwnd(_hwnd);
@@ -100,7 +93,7 @@ public sealed class TrayIcon : IDisposable
         };
         Shell_NotifyIcon(NIM_DELETE, ref nid);
         if (_hIcon != IntPtr.Zero)
-            DestroyIcon(_hIcon);
+            _icon?.Dispose();
     }
 
 }
