@@ -41,10 +41,10 @@ public sealed class WinEventHook : IDisposable
     private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
 
     [DllImport("user32.dll")]
-    private static extern IntPtr GetForegroundWindow();
+    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 
-    [DllImport("user32.dll")]
-    private static extern bool IsWindowVisible(IntPtr hWnd);
+    private const int GWL_EXSTYLE = -20;
+    private const uint WS_EX_TOOLWINDOW = 0x00000080;
 
     public event EventHandler<WinEventHookEventArgs>? ForegroundChanged;
 
@@ -70,9 +70,9 @@ public sealed class WinEventHook : IDisposable
     private void WinEventProc(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
     {
-        // ponytail: skip window that is no longer foreground or invisible — catches alt-tab UI
-        // and transient system windows that would otherwise fire ApplyDefault() erroneously.
-        if (GetForegroundWindow() != hwnd || !IsWindowVisible(hwnd)) return;
+        // ponytail: skip tool/overlay windows (alt-tab switcher, tooltips).
+        // WS_EX_TOOLWINDOW is a static property — GetForegroundWindow() is stale with fast alt-tabs.
+        if (((uint)GetWindowLong(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) return;
 
         GetWindowThreadProcessId(hwnd, out uint processId);
         int len = GetWindowTextLengthW(hwnd);
