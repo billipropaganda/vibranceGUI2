@@ -40,6 +40,12 @@ public sealed class WinEventHook : IDisposable
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowTextW(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
     public event EventHandler<WinEventHookEventArgs>? ForegroundChanged;
 
     private readonly IntPtr _hookHandle;
@@ -64,6 +70,10 @@ public sealed class WinEventHook : IDisposable
     private void WinEventProc(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
     {
+        // ponytail: skip window that is no longer foreground or invisible — catches alt-tab UI
+        // and transient system windows that would otherwise fire ApplyDefault() erroneously.
+        if (GetForegroundWindow() != hwnd || !IsWindowVisible(hwnd)) return;
+
         GetWindowThreadProcessId(hwnd, out uint processId);
         int len = GetWindowTextLengthW(hwnd);
         var sb = new StringBuilder(len + 1);
